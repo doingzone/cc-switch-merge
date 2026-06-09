@@ -185,7 +185,8 @@ if [[ -f "$CC_LOG" ]]; then
                 # - 热切换 (用户主动切 provider): cc-switch 改自己的 DB + Live 接管 (写 settings.json/config.toml)
                 # - Claude Live 配置已接管 (cc-switch 启动接管恢复): 写 settings.json (claude Live 接管)
                 # - Codex Live 配置已接管: 写 config.toml (codex Live 接管)
-                if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商|Claude Live 配置已接管, 代理地址:|Codex Live 配置已接管, 代理地址:'; then
+                # 注意: cc-switch.log 里用中文逗号 '，' 不是英文 ',', pattern 不含逗号
+                if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商|Claude Live 配置已接管.*代理地址|Codex Live 配置已接管.*代理地址'; then
                     echo "[watcher] iter=$ITER HOT SWITCH detected" >> "$DEBUG_LOG"
                     HOT_LINE=$(echo "$NEW" | grep -E '热切换.*目标供应商' | tail -1)
                     PROVIDER_ID=$(echo "$HOT_LINE" | grep -oP '目标供应商为 \K[a-f0-9-]+')
