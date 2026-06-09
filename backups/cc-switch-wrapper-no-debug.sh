@@ -161,22 +161,17 @@ WATCHDOG_PID=$!
 # (用户切了 provider 不需要等关 GUI 就能同步)
 WATCHER_PID=""
 CC_LOG="$HOME/.cc-switch/logs/cc-switch.log"
-DEBUG_LOG="/tmp/cc-switch-watcher-debug.log"
 if [[ -f "$CC_LOG" ]]; then
     (
         LAST_SIZE=0
-        ITER=0
-        echo "[watcher] start, CC_PID=$CC_PID, CC_LOG=$CC_LOG" >> "$DEBUG_LOG"
         while kill -0 "$CC_PID" 2>/dev/null; do
-            ITER=$((ITER + 1))
             sleep 2
-            [[ -f "$CC_LOG" ]] || { echo "[watcher] iter=$ITER CC_LOG gone, continue" >> "$DEBUG_LOG"; continue; }
+            [[ -f "$CC_LOG" ]] || continue
             CUR_SIZE=$(stat -c%s "$CC_LOG" 2>/dev/null || echo 0)
-            echo "[watcher] iter=$ITER LAST=$LAST_SIZE CUR=$CUR_SIZE" >> "$DEBUG_LOG"
             if [[ "$CUR_SIZE" -gt "$LAST_SIZE" ]]; then
                 NEW=$(tail -c +$((LAST_SIZE + 1)) "$CC_LOG" 2>/dev/null)
                 if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商'; then
-                    echo "[watcher] iter=$ITER HOT SWITCH detected" >> "$DEBUG_LOG"
+                    # 从日志提取 provider UUID 和 app_type, 从 DB 查 model 名
                     HOT_LINE=$(echo "$NEW" | grep -E '热切换.*目标供应商' | tail -1)
                     PROVIDER_ID=$(echo "$HOT_LINE" | grep -oP '目标供应商为 \K[a-f0-9-]+')
                     APP_TYPE=$(echo "$HOT_LINE" | grep -oP '热切换 \K\S+' | head -1)
@@ -205,7 +200,6 @@ except: pass
                         echo "[cc-switch] 热切换: provider=$PROVIDER_ID (未找到 model)" | tee -a /tmp/cc-switch-wrapper.log
                     fi
                     sleep 3
-                    echo "[watcher] iter=$ITER after sleep 3, before merge" >> "$DEBUG_LOG"
                     if [[ -f "$MERGE_SCRIPT" ]]; then
                         EXTRA_ARGS=""
                         if [[ -n "$MODEL_OVERRIDE" ]]; then
@@ -224,16 +218,13 @@ except: pass
                             --backup-dir "$BACKUP_DIR" \
                             $EXTRA_ARGS \
                             all 2>&1 | tee -a /tmp/cc-switch-wrapper.log
-                        echo "[watcher] iter=$ITER merge done, RC=${PIPESTATUS[0]}" >> "$DEBUG_LOG"
                     fi
                 fi
                 LAST_SIZE=$CUR_SIZE
             fi
         done
-        echo "[watcher] EXIT: kill -0 $CC_PID returned false" >> "$DEBUG_LOG"
     ) &
     WATCHER_PID=$!
-    echo "[watcher] started, PID=$WATCHER_PID" >> "$DEBUG_LOG"
 fi
 
 # 等待 cc-switch 完成 (用户关 GUI / Ctrl+C)

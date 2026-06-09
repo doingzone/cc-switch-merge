@@ -51,6 +51,19 @@ bash cc-switch-sim.sh                           # 端到端模拟
 | D | auth.json 备份 + mtime-based 跨端同步 |
 | E | wrapper 日志 watcher 同时支持 codex + claude provider, 写 env.ANTHROPIC_MODEL |
 
+## Debug
+
+wrapper 启动时会在 `/tmp/cc-switch-watcher-debug.log` 写 watcher 每次循环的状态 (0.1KB/次):
+
+- `[watcher] start` — watcher 启动
+- `[watcher] iter=N LAST=X CUR=Y` — 每次循环, mtime 变化
+- `[watcher] iter=N HOT SWITCH detected` — 检测到热切换
+- `[watcher] iter=N after sleep 3, before merge` — 合并前
+- `[watcher] iter=N merge done, RC=N` — 合并后, RC=0 成功
+- `[watcher] EXIT` — 主循环正常退出 (cc-switch 死了)
+
+如果"配置又只剩 env 了", 第一时间 `cat /tmp/cc-switch-watcher-debug.log` 看 watcher 在哪死的。
+
 ## cc-switch 升级后
 
 如果 cc-switch 升级改了**日志格式** (热切换关键字) 或 **DB schema** (settings_config 字段), 跑这两个验证:
