@@ -164,6 +164,7 @@ CC_LOG="$HOME/.cc-switch/logs/cc-switch.log"
 DEBUG_LOG="/tmp/cc-switch-watcher-debug.log"
 if [[ -f "$CC_LOG" ]]; then
     (
+        set +e  # watcher 不能因为单次 merge 失败就死, 必须持续循环
         LAST_SIZE=0
         ITER=0
         echo "[watcher] start, CC_PID=$CC_PID, CC_LOG=$CC_LOG" >> "$DEBUG_LOG"
