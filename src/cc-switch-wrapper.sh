@@ -231,6 +231,37 @@ except: pass
                             $EXTRA_ARGS \
                             all 2>&1 | tee -a /tmp/cc-switch-wrapper.log
                         echo "[watcher] iter=$ITER merge done, RC=${PIPESTATUS[0]}" >> "$DEBUG_LOG"
+
+                        # Race condition 防护: cc-switch 接管时会写 settings.json 覆盖 wrapper 的合并
+                        # 合并后等 5 秒, 看 settings.json keys 数量, < 10 重新合并 (最多 3 次)
+                        for RETRY in 1 2 3; do
+                            sleep 5
+                            KEY_COUNT=$(python3 -c "
+import json
+try:
+    d = json.load(open('$SETTINGS_FILE'))
+    print(len(d))
+except: print(0)
+" 2>/dev/null)
+                            echo "[watcher] iter=$ITER retry=$RETRY settings.json keys=$KEY_COUNT" >> "$DEBUG_LOG"
+                            if [[ "$KEY_COUNT" -ge 10 ]]; then
+                                echo "[watcher] iter=$ITER stable after retry=$RETRY" >> "$DEBUG_LOG"
+                                break
+                            fi
+                            echo "[watcher] iter=$ITER cc-switch 覆盖了, retry=$RETRY" | tee -a /tmp/cc-switch-wrapper.log
+                            python3 "$MERGE_SCRIPT" \
+                                --settings "$SETTINGS_FILE" \
+                                --settings-backup "$CONFIG_BACKUP" \
+                                --wsl-config "$CODEX_CONFIG" \
+                                --wsl-backup "$CODEX_BACKUP" \
+                                --windows-config "$WINDOWS_CONFIG" \
+                                --windows-backup "$WINDOWS_BACKUP" \
+                                --wsl-auth "$CODEX_AUTH" \
+                                --windows-auth "$WINDOWS_AUTH" \
+                                --backup-dir "$BACKUP_DIR" \
+                                $EXTRA_ARGS \
+                                all 2>&1 | tee -a /tmp/cc-switch-wrapper.log
+                        done
                     fi
                 fi
                 LAST_SIZE=$CUR_SIZE
