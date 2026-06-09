@@ -173,6 +173,12 @@ if [[ -f "$CC_LOG" ]]; then
             [[ -f "$CC_LOG" ]] || { echo "[watcher] iter=$ITER CC_LOG gone, continue" >> "$DEBUG_LOG"; continue; }
             CUR_SIZE=$(stat -c%s "$CC_LOG" 2>/dev/null || echo 0)
             echo "[watcher] iter=$ITER LAST=$LAST_SIZE CUR=$CUR_SIZE" >> "$DEBUG_LOG"
+            # 处理 cc-switch.log truncate/rotate: CUR 突然变小 (e.g. cc-switch 重新打开 log 文件)
+            # 之前的 LAST_SIZE 是 truncate 前的, 新内容 size < 老 size, 必须重置 LAST_SIZE=0 重新读
+            if [[ "$CUR_SIZE" -lt "$LAST_SIZE" ]]; then
+                echo "[watcher] iter=$ITER log truncated/rotated: $LAST_SIZE -> $CUR_SIZE, reset LAST_SIZE=0" >> "$DEBUG_LOG"
+                LAST_SIZE=0
+            fi
             if [[ "$CUR_SIZE" -gt "$LAST_SIZE" ]]; then
                 NEW=$(tail -c +$((LAST_SIZE + 1)) "$CC_LOG" 2>/dev/null)
                 if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商'; then
