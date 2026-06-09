@@ -188,12 +188,14 @@ if [[ -f "$CC_LOG" ]]; then
                 # 注意: cc-switch.log 里用中文逗号 '，' 不是英文 ',', pattern 不含逗号
                 if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商|Claude Live 配置已接管.*代理地址|Codex Live 配置已接管.*代理地址'; then
                     echo "[watcher] iter=$ITER HOT SWITCH detected" >> "$DEBUG_LOG"
+                    # 只有"热切换"事件需要查 provider UUID/model. 接管事件没这些字段, 直接合并即可
                     HOT_LINE=$(echo "$NEW" | grep -E '热切换.*目标供应商' | tail -1)
-                    PROVIDER_ID=$(echo "$HOT_LINE" | grep -oP '目标供应商为 \K[a-f0-9-]+')
-                    APP_TYPE=$(echo "$HOT_LINE" | grep -oP '热切换 \K\S+' | head -1)
-                    MODEL_OVERRIDE=""
-                    if [[ -n "$PROVIDER_ID" && -n "$APP_TYPE" ]]; then
-                        MODEL_OVERRIDE=$(python3 -c "
+                    if [[ -n "$HOT_LINE" ]]; then
+                        PROVIDER_ID=$(echo "$HOT_LINE" | grep -oP '目标供应商为 \K[a-f0-9-]+')
+                        APP_TYPE=$(echo "$HOT_LINE" | grep -oP '热切换 \K\S+' | head -1)
+                        MODEL_OVERRIDE=""
+                        if [[ -n "$PROVIDER_ID" && -n "$APP_TYPE" ]]; then
+                            MODEL_OVERRIDE=$(python3 -c "
 import sqlite3, json, re, sys
 try:
     conn = sqlite3.connect('$HOME/.cc-switch/cc-switch.db')
@@ -209,19 +211,23 @@ try:
             print(m.group(1) if m else '')
 except: pass
 " 2>/dev/null)
-                    fi
-                    if [[ -n "$MODEL_OVERRIDE" ]]; then
-                        echo "[cc-switch] 热切换: provider=$PROVIDER_ID model=$MODEL_OVERRIDE" | tee -a /tmp/cc-switch-wrapper.log
-                    else
-                        echo "[cc-switch] 热切换: provider=$PROVIDER_ID (未找到 model)" | tee -a /tmp/cc-switch-wrapper.log
-                    fi
-                    sleep 3
-                    echo "[watcher] iter=$ITER after sleep 3, before merge" >> "$DEBUG_LOG"
-                    if [[ -f "$MERGE_SCRIPT" ]]; then
+                        fi
+                        if [[ -n "$MODEL_OVERRIDE" ]]; then
+                            echo "[cc-switch] 热切换: provider=$PROVIDER_ID model=$MODEL_OVERRIDE" | tee -a /tmp/cc-switch-wrapper.log
+                        else
+                            echo "[cc-switch] 热切换: provider=$PROVIDER_ID (未找到 model)" | tee -a /tmp/cc-switch-wrapper.log
+                        fi
                         EXTRA_ARGS=""
                         if [[ -n "$MODEL_OVERRIDE" ]]; then
                             EXTRA_ARGS="--override-model $MODEL_OVERRIDE"
                         fi
+                    else
+                        # 接管事件: 没有 PROVIDER_ID, 不需要 --override-model
+                        EXTRA_ARGS=""
+                    fi
+                    sleep 3
+                    echo "[watcher] iter=$ITER after sleep 3, before merge" >> "$DEBUG_LOG"
+                    if [[ -f "$MERGE_SCRIPT" ]]; then
                         echo "[cc-switch] 自动合并: $MERGE_SCRIPT $EXTRA_ARGS" | tee -a /tmp/cc-switch-wrapper.log
                         python3 "$MERGE_SCRIPT" \
                             --settings "$SETTINGS_FILE" \
