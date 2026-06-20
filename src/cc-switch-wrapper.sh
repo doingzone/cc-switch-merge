@@ -223,8 +223,40 @@ except: pass
                             EXTRA_ARGS="--override-model $MODEL_OVERRIDE"
                         fi
                     else
-                        # 接管事件: 没有 PROVIDER_ID, 不需要 --override-model
+                        # 接管事件: cc-switch 启动接管恢复, 用的是上次崩溃前的 provider 配置
+                        # 不是当前选中的 provider. 从 DB 查 is_current=1 的 provider model 来纠正
+                        TAKEOVER_APP_TYPE=""
+                        if echo "$NEW" | grep -q 'Claude Live 配置已接管'; then
+                            TAKEOVER_APP_TYPE="claude"
+                        elif echo "$NEW" | grep -q 'Codex Live 配置已接管'; then
+                            TAKEOVER_APP_TYPE="codex"
+                        fi
+                        MODEL_OVERRIDE=""
+                        if [[ -n "$TAKEOVER_APP_TYPE" ]]; then
+                            MODEL_OVERRIDE=$(python3 -c "
+import sqlite3, json, re
+try:
+    conn = sqlite3.connect('$HOME/.cc-switch/cc-switch.db')
+    row = conn.execute('SELECT settings_config FROM providers WHERE is_current = 1 AND app_type = ?', ('$TAKEOVER_APP_TYPE',)).fetchone()
+    conn.close()
+    if row:
+        sc = json.loads(row[0])
+        if '$TAKEOVER_APP_TYPE' == 'claude':
+            print(sc.get('env', {}).get('ANTHROPIC_MODEL', ''))
+        else:
+            cfg = sc.get('config','')
+            m = re.search(r'^model\s*=\s*\"([^\"]+)\"', cfg, re.M)
+            print(m.group(1) if m else '')
+except: pass
+" 2>/dev/null)
+                        fi
                         EXTRA_ARGS=""
+                        if [[ -n "$MODEL_OVERRIDE" ]]; then
+                            EXTRA_ARGS="--override-model $MODEL_OVERRIDE"
+                            echo "[cc-switch] 接管恢复: app=$TAKEOVER_APP_TYPE model=$MODEL_OVERRIDE (override)" | tee -a /tmp/cc-switch-wrapper.log
+                        else
+                            echo "[cc-switch] 接管恢复: app=$TAKEOVER_APP_TYPE (未找到 current provider model)" | tee -a /tmp/cc-switch-wrapper.log
+                        fi
                     fi
                     sleep 3
                     echo "[watcher] iter=$ITER after sleep 3, before merge" >> "$DEBUG_LOG"

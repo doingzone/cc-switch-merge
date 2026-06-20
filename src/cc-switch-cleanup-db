@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# cc-switch DB 清理: 删 proxy_request_logs 里超过 30 天的行
+# 必须先停 cc-switch (它持有 DB 写锁)
+set -euo pipefail
+
+DB="$HOME/.cc-switch/cc-switch.db"
+BACKUP_DIR="$HOME/.cc-switch/backups"
+RETAIN_DAYS="${RETAIN_DAYS:-30}"
+LOG="/tmp/cc-switch-cleanup.log"
+
+mkdir -p "$BACKUP_DIR"
+
+echo "=== cc-switch DB 清理 ($(date '+%F %T')) ===" | tee -a "$LOG"
+echo "DB:           $DB" | tee -a "$LOG"
+echo "RETAIN_DAYS:  $RETAIN_DAYS" | tee -a "$LOG"
+
+# 1. 停 cc-switch
+if pgrep -f '^/usr/bin/cc-switch' >/dev/null 2>&1; then
+    echo "[1/5] 停 cc-switch..." | tee -a "$LOG"
+    pkill -TERM -f '^/usr/bin/cc-switch' || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! pgrep -f '^/usr/bin/cc-switch' >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    if pgrep -f '^/usr/bin/cc-switch' >/dev/null 2>&1; then
+        echo "ERROR: cc-switch 未能停止, 强杀" | tee -a "$LOG"
+        pkill -9 -f '^/usr/bin/cc-switch' || true
+    fi
+fi
+
+# 2. 备份
+echo "[2/5] 备份 DB..." | tee -a "$LOG"
+ts=$(date +%Y%m%d_%H%M%S)
+BAK="$BACKUP_DIR/db_before_cleanup_${ts}.db"
+cp "$DB" "$BAK"
+SIZE_BEFORE=$(stat -c%s "$DB")
+echo "  备份: $BAK ($(numfmt --to=iec $SIZE_BEFORE))" | tee -a "$LOG"
+
+# 3. 删行 + VACUUM
+echo "[3/5] 删 proxy_request_logs 里 > ${RETAIN_DAYS} 天的行..." | tee -a "$LOG"
+python3 <<EOF | tee -a "$LOG"
+import sqlite3, time
+conn = sqlite3.connect("$DB")
+cutoff = int(time.time()) - $RETAIN_DAYS * 86400
+before = conn.execute("SELECT COUNT(*) FROM proxy_request_logs").fetchone()[0]
+old = conn.execute("SELECT COUNT(*) FROM proxy_request_logs WHERE created_at < ?", (cutoff,)).fetchone()[0]
+print(f"  删前总行数: {before}")
+print(f"  待删行数:   {old}")
+if old > 0:
+    conn.execute("DELETE FROM proxy_request_logs WHERE created_at < ?", (cutoff,))
+    conn.commit()
+after = conn.execute("SELECT COUNT(*) FROM proxy_request_logs").fetchone()[0]
+print(f"  删后总行数: {after}")
+print(f"  实际删除:   {before - after}")
+conn.close()
+EOF
+
+echo "[4/5] VACUUM (回收空间)..." | tee -a "$LOG"
+python3 -c "
+import sqlite3, os
+db = '$DB'
+sz1 = os.path.getsize(db)
+conn = sqlite3.connect(db)
+conn.execute('VACUUM')
+conn.close()
+sz2 = os.path.getsize(db)
+print(f'  {sz1/1024/1024:.2f} MB -> {sz2/1024/1024:.2f} MB (节省 {(sz1-sz2)/1024/1024:.2f} MB)')
+" 2>&1 | tee -a "$LOG"
+
+SIZE_AFTER=$(stat -c%s "$DB")
+SAVED=$((SIZE_BEFORE - SIZE_AFTER))
+echo "[5/5] 完成" | tee -a "$LOG"
+echo "  清理前 DB: $(numfmt --to=iec $SIZE_BEFORE)" | tee -a "$LOG"
+echo "  清理后 DB: $(numfmt --to=iec $SIZE_AFTER)" | tee -a "$LOG"
+echo "  节省空间:  $(numfmt --to=iec $SAVED)" | tee -a "$LOG"
+echo "" | tee -a "$LOG"
+
+# 4. 重启 cc-switch
+echo "重启 cc-switch? [y/N] (3 秒后默认 N)"
+read -t 3 -n 1 -r REPLY || REPLY="n"
+echo
+if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    cc-switch &
+    echo "已启动 cc-switch" | tee -a "$LOG"
+else
+    echo "未自动启动, 手动运行 'cc-switch' 启动" | tee -a "$LOG"
+fi
