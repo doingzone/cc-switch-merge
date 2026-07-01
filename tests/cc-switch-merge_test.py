@@ -36,6 +36,7 @@ restore_reduced_codex = _mod.restore_reduced_codex
 cmd_merge_settings = _mod.cmd_merge_settings
 cmd_regen_claude = _mod.cmd_regen_claude
 cmd_sync_auth = _mod.cmd_sync_auth
+cmd_all = _mod.cmd_all
 
 
 def _complete_claude_settings(env=None, plugins=5, hooks=3, allow=None, extra=None):
@@ -906,6 +907,113 @@ class TestIntegrationToml(unittest.TestCase):
         sc = json.loads(codex_settings)
         m = re.search(r'^model\s*=\s*"([^"]+)"', sc.get("config", ""), re.MULTILINE)
         self.assertEqual(m.group(1), "glm-5.1")
+
+
+class TestCmdAll(unittest.TestCase):
+    """cmd_all 分组感知: --app-type 限定只处理对应 app, 不跨 app 污染。
+
+    修复 "改 Claude provider 时 Codex 跟着切": claude 事件只动 settings.json,
+    codex 事件只动 config.toml, override_model 不跨 app。
+    """
+
+    def setUp(self):
+        self.tmp = Path("/tmp/cc-switch-merge-cmd-all-test")
+        if self.tmp.exists():
+            shutil.rmtree(self.tmp)
+        self.tmp.mkdir(parents=True)
+        self.settings = self.tmp / "settings.json"
+        self.settings_bak = self.tmp / "settings.json.bak"
+        self.wsl_config = self.tmp / "config.toml"
+        self.wsl_bak = self.tmp / "config.toml.bak"
+        self.backup_dir = self.tmp / "backups"
+        self.backup_dir.mkdir()
+
+    def tearDown(self):
+        if self.tmp.exists():
+            shutil.rmtree(self.tmp)
+
+    def _write_fixtures(self):
+        # Claude: before 完整(骨架), after 缩水(只 env)
+        before_claude = _complete_claude_settings(
+            env={"ANTHROPIC_MODEL": "claude-old", "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp"},
+            plugins=3, hooks=3, allow=["Bash(claude:*)"],
+        )
+        self.settings.write_text(
+            json.dumps({"env": {"ANTHROPIC_MODEL": "claude-new"}}), encoding="utf-8"
+        )
+        self.settings_bak.write_text(json.dumps(before_claude), encoding="utf-8")
+        # Codex: before 完整(含 projects/tui), after 缩水(只 model)
+        before_codex = {
+            "model": "codex-old", "model_provider": "custom",
+            "model_providers": {"custom": {"name": "custom", "base_url": "http://x", "wire_api": "chat"}},
+            "projects": {"p1": {"path": "/tmp"}}, "tui": {"mode": "dark"},
+        }
+        self.wsl_config.write_text(
+            tomli_w.dumps({"model": "codex-new", "model_provider": "custom"}), encoding="utf-8"
+        )
+        self.wsl_bak.write_text(tomli_w.dumps(before_codex), encoding="utf-8")
+
+    def _args(self, app_type=None):
+        from argparse import Namespace
+        return Namespace(
+            settings=self.settings, settings_backup=self.settings_bak,
+            wsl_config=self.wsl_config, wsl_backup=self.wsl_bak,
+            windows_config=self.tmp / "win-config.toml",       # 不存在 → sync_windows 跳过
+            windows_backup=self.tmp / "win-config.bak.toml",   # 不存在 → sync_windows 跳过
+            wsl_auth=self.tmp / "auth.json",                   # 不存在 → sync_auth 跳过
+            windows_auth=self.tmp / "win-auth.json",           # 不存在
+            backup_dir=self.backup_dir, override_model=None,
+            app_type=app_type,
+        )
+
+    def test_app_type_claude_only_merges_settings(self):
+        """--app-type claude: 只 merge-settings, Codex config 完全不动。"""
+        self._write_fixtures()
+        config_mtime = self.wsl_config.stat().st_mtime
+        rc = cmd_all(self._args(app_type="claude"))
+        self.assertEqual(rc, 0)
+        # Claude settings 被合并(before 骨架 + after model)
+        result = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "claude-new")
+        self.assertEqual(len(result["enabledPlugins"]), 3)
+        # Codex config 完全不动(mtime + 内容)
+        self.assertEqual(self.wsl_config.stat().st_mtime, config_mtime)
+        self.assertEqual(
+            tomllib.loads(self.wsl_config.read_text(encoding="utf-8"))["model"], "codex-new"
+        )
+
+    def test_app_type_codex_only_merges_config(self):
+        """--app-type codex: 只 codex 命令, Claude settings 不动。"""
+        self._write_fixtures()
+        settings_mtime = self.settings.stat().st_mtime
+        rc = cmd_all(self._args(app_type="codex"))
+        self.assertEqual(rc, 0)
+        # Codex config 被合并(before 骨架 projects/tui 保留 + after model)
+        result = tomllib.loads(self.wsl_config.read_text(encoding="utf-8"))
+        self.assertEqual(result["model"], "codex-new")
+        self.assertIn("projects", result)
+        # Claude settings 不动(mtime)
+        self.assertEqual(self.settings.stat().st_mtime, settings_mtime)
+
+    def test_app_type_all_merges_both(self):
+        """--app-type all(或缺省): 两者都处理(向后兼容)。"""
+        self._write_fixtures()
+        rc = cmd_all(self._args(app_type="all"))
+        self.assertEqual(rc, 0)
+        result_claude = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(len(result_claude["enabledPlugins"]), 3)
+        result_codex = tomllib.loads(self.wsl_config.read_text(encoding="utf-8"))
+        self.assertIn("projects", result_codex)
+
+    def test_no_app_type_defaults_to_all(self):
+        """无 --app-type(退出合并兜底): 全部(向后兼容)。"""
+        self._write_fixtures()
+        rc = cmd_all(self._args(app_type=None))
+        self.assertEqual(rc, 0)
+        result_claude = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(len(result_claude["enabledPlugins"]), 3)
+        result_codex = tomllib.loads(self.wsl_config.read_text(encoding="utf-8"))
+        self.assertIn("projects", result_codex)
 
 
 if __name__ == "__main__":

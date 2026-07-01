@@ -189,6 +189,11 @@ if [[ -f "$CC_LOG" ]]; then
                 # 注意: cc-switch.log 里用中文逗号 '，' 不是英文 ',', pattern 不含逗号
                 if echo "$NEW" | grep -qE '热切换 (codex|claude) 的目标供应商|Claude Live 配置已接管.*代理地址|Codex Live 配置已接管.*代理地址'; then
                     echo "[watcher] iter=$ITER HOT SWITCH detected" >> "$DEBUG_LOG"
+                    # 重置事件变量(防循环迭代间泄漏: 上次热切换 APP_TYPE 残留到这次接管)
+                    APP_TYPE=""
+                    TAKEOVER_APP_TYPE=""
+                    MODEL_OVERRIDE=""
+                    EXTRA_ARGS=""
                     # 只有"热切换"事件需要查 provider UUID/model. 接管事件没这些字段, 直接合并即可
                     HOT_LINE=$(echo "$NEW" | grep -E '热切换.*目标供应商' | tail -1)
                     if [[ -n "$HOT_LINE" ]]; then
@@ -258,6 +263,8 @@ except: pass
                             echo "[cc-switch] 接管恢复: app=$TAKEOVER_APP_TYPE (未找到 current provider model)" | tee -a /tmp/cc-switch-wrapper.log
                         fi
                     fi
+                    # 统一 app_type(热切换 APP_TYPE 或 接管 TAKEOVER_APP_TYPE), 传给 cmd_all 分组触发
+                    EFFECTIVE_APP_TYPE="${APP_TYPE:-${TAKEOVER_APP_TYPE:-}}"
                     sleep 3
                     echo "[watcher] iter=$ITER after sleep 3, before merge" >> "$DEBUG_LOG"
                     if [[ -f "$MERGE_SCRIPT" ]]; then
@@ -273,6 +280,7 @@ except: pass
                             --windows-auth "$WINDOWS_AUTH" \
                             --backup-dir "$BACKUP_DIR" \
                             $EXTRA_ARGS \
+                            --app-type "$EFFECTIVE_APP_TYPE" \
                             all 2>&1 | tee -a /tmp/cc-switch-wrapper.log
                         echo "[watcher] iter=$ITER merge done, RC=${PIPESTATUS[0]}" >> "$DEBUG_LOG"
 
@@ -304,6 +312,7 @@ except: print(0)
                                 --windows-auth "$WINDOWS_AUTH" \
                                 --backup-dir "$BACKUP_DIR" \
                                 $EXTRA_ARGS \
+                                --app-type "$EFFECTIVE_APP_TYPE" \
                                 all 2>&1 | tee -a /tmp/cc-switch-wrapper.log
                         done
                     fi

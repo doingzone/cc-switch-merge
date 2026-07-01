@@ -886,18 +886,35 @@ def cmd_sync_auth(args) -> int:
 
 
 def cmd_all(args) -> int:
-    """Run merge-settings, merge-codex-wsl, sync-windows, sync-auth in order."""
-    rc1 = cmd_merge_settings(args)
-    if rc1 != 0:
-        return rc1
+    """Run merge + sync, optionally scoped to one app_type (分组感知).
 
-    rc2 = cmd_merge_codex_wsl(args)
-    if rc2 != 0:
-        return rc2
+    --app-type claude: 只 cmd_merge_settings(Claude 切换不污染 Codex config)
+    --app-type codex:  只 codex 命令(merge-codex-wsl + sync-windows + sync-auth)
+    --app-type all/缺省: 全部(向后兼容, 退出合并兜底用)
 
-    # Windows 同步失败不阻塞 (可能 Windows 文件不可达)
-    cmd_sync_windows(args)
-    cmd_sync_auth(args)
+    修复: 改 Claude provider 时 Codex 跟着切(wrapper 无脑跑 all + 同一个 override)。
+    """
+    app = getattr(args, "app_type", None)
+    if app in (None, "", "all"):
+        rc = cmd_merge_settings(args)
+        if rc != 0:
+            return rc
+        rc = cmd_merge_codex_wsl(args)
+        if rc != 0:
+            return rc
+        # Windows 同步失败不阻塞 (可能 Windows 文件不可达)
+        cmd_sync_windows(args)
+        cmd_sync_auth(args)
+    elif app == "claude":
+        rc = cmd_merge_settings(args)
+        if rc != 0:
+            return rc
+    elif app == "codex":
+        rc = cmd_merge_codex_wsl(args)
+        if rc != 0:
+            return rc
+        cmd_sync_windows(args)
+        cmd_sync_auth(args)
     return 0
 
 
@@ -972,6 +989,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Override model name (from cc-switch DB, hot-switch doesn't write config)",
+    )
+    parser.add_argument(
+        "--app-type",
+        type=str,
+        default=None,
+        choices=["claude", "codex", "all"],
+        help="Scope cmd_all to one app (分组感知): claude=只 Claude, codex=只 Codex, all/缺省=全部",
     )
     parser.add_argument(
         "--wsl-auth",
