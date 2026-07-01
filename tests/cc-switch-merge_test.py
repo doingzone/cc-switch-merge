@@ -203,6 +203,25 @@ class TestMergeSettingsWithTruth(unittest.TestCase):
         for key in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
             self.assertEqual(result["env"][key], after["env"][key])
 
+    def test_fable_default_model_keys_follow_after_env(self):
+        truth = {
+            "env": {
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "MiniMax-M3[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "MiniMax-M3",
+            }
+        }
+        after = {
+            "env": {
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "glm-5.2",
+            }
+        }
+
+        result = merge_settings_with_truth(after, truth)
+
+        self.assertEqual(result["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"], "glm-5.2[1M]")
+        self.assertEqual(result["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"], "glm-5.2")
+
     def test_truth_whitelist_env_kept_when_after_omits(self):
         """after 缺白名单字段时, 从 truth 兜底(修复 API_KEY 丢失;权衡: stale 也保留)。
 
