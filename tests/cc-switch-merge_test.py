@@ -21,7 +21,7 @@ assert spec is not None and spec.loader is not None
 _mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_mod)
 merge_settings = _mod.merge_settings
-merge_settings_with_last_good = _mod.merge_settings_with_last_good
+merge_settings_with_truth = _mod.merge_settings_with_truth
 merge_codex = _mod.merge_codex
 merge_codex_for_windows = _mod.merge_codex_for_windows
 prune_backups = _mod.prune_backups
@@ -31,16 +31,11 @@ CCS_CLAUDE_ENV_OVERRIDE_KEYS = _mod.CCS_CLAUDE_ENV_OVERRIDE_KEYS
 _rewrite_base_url = _mod._rewrite_base_url
 _get_wsl_ip = _mod._get_wsl_ip
 find_intact_settings_backup = _mod.find_intact_settings_backup
-restore_missing_settings_keys = _mod.restore_missing_settings_keys
-restore_reduced_settings_keys = _mod.restore_reduced_settings_keys
-load_last_good_settings = _mod.load_last_good_settings
-maybe_initialize_last_good_settings = _mod.maybe_initialize_last_good_settings
 find_richest_codex_backup = _mod.find_richest_codex_backup
 restore_reduced_codex = _mod.restore_reduced_codex
 cmd_merge_settings = _mod.cmd_merge_settings
 cmd_regen_claude = _mod.cmd_regen_claude
 cmd_sync_auth = _mod.cmd_sync_auth
-heal_last_good_settings = _mod.heal_last_good_settings
 
 
 def _complete_claude_settings(env=None, plugins=5, hooks=3, allow=None, extra=None):
@@ -140,8 +135,8 @@ class TestMergeSettings(unittest.TestCase):
         self.assertIn("d", keys[2:])
 
 
-class TestMergeSettingsWithLastGood(unittest.TestCase):
-    """Claude last_good 合成: last_good 是稳定真相, after 只覆盖白名单 env。"""
+class TestMergeSettingsWithTruth(unittest.TestCase):
+    """truth 作骨架 + after 白名单 env 覆盖。"""
 
     def test_keeps_last_good_structure_and_overrides_switch_env(self):
         last_good = {
@@ -163,7 +158,7 @@ class TestMergeSettingsWithLastGood(unittest.TestCase):
             "hooks": {"SessionStart": []},
         }
 
-        result = merge_settings_with_last_good(after, last_good)
+        result = merge_settings_with_truth(after, last_good)
 
         self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "new-model")
         self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token")
@@ -187,7 +182,7 @@ class TestMergeSettingsWithLastGood(unittest.TestCase):
             }
         }
 
-        result = merge_settings_with_last_good(after, last_good)
+        result = merge_settings_with_truth(after, last_good)
 
         self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "keep-from-last-good")
         self.assertEqual(result["env"]["CUSTOM_USER_FLAG"], "keep")
@@ -202,165 +197,46 @@ class TestMergeSettingsWithLastGood(unittest.TestCase):
             }
         }
 
-        result = merge_settings_with_last_good(after, last_good)
+        result = merge_settings_with_truth(after, last_good)
 
         for key in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
             self.assertEqual(result["env"][key], after["env"][key])
 
-    def test_removes_stale_switch_owned_env_when_after_omits_key(self):
-        last_good = {
+    def test_truth_whitelist_env_kept_when_after_omits(self):
+        """after 缺白名单字段时, 从 truth 兜底(修复 API_KEY 丢失;权衡: stale 也保留)。
+
+        旧 merge_settings_with_truth 会丢弃 truth 的白名单字段(为清 stale),
+        但 after 缺省时连 API_KEY=PROXY_MANAGED 都丢。新逻辑: truth 全保留作基底,
+        清 stale 依赖 after 显式提供新值。
+        """
+        truth = {
             "env": {
                 "ANTHROPIC_MODEL": "stale-model",
-                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_AUTH_TOKEN": "truth-token",
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "keep-gh",
             }
         }
         after = {"env": {"ANTHROPIC_MODEL": "fresh-model"}}
 
-        result = merge_settings_with_last_good(after, last_good)
+        result = merge_settings_with_truth(after, truth)
 
         self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "fresh-model")
-        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", result["env"])
+        self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "truth-token")  # truth 兜底
         self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "keep-gh")
 
 
-class TestLastGoodHealing(unittest.TestCase):
-    def test_heal_uses_backup_for_missing_structure_and_before_for_new_stable_keys(self):
-        last_good = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "old-gh"},
-            plugins=1,
-            hooks=1,
-            allow=["Bash(old:*)"],
-        )
-        backup = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "backup-gh"},
-            plugins=4,
-            hooks=4,
-            allow=["Bash(backup:*)"],
-        )
-        before = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "fresh-gh"},
-            plugins=2,
-            hooks=2,
-            allow=["Bash(before:*)"],
-            extra={"newStableTopLevel": {"enabled": True}},
-        )
-        before["enabledPlugins"]["freshPlugin"] = True
-        before["hooks"]["FreshHook"] = []
+class TestCmdMergeSettings(unittest.TestCase):
+    """cmd_merge_settings: 选骨架(before 完整用 before, 否则 richest backup) + 白名单 env 合成。"""
 
-        healed, changes = heal_last_good_settings(
-            last_good,
-            (("backup", backup, "missing"), ("before", before, "overwrite")),
-        )
-
-        self.assertEqual(healed["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "fresh-gh")
-        self.assertEqual(len(healed["enabledPlugins"]), 5)
-        self.assertEqual(len(healed["hooks"]), 5)
-        self.assertIn("newStableTopLevel", healed)
-        self.assertIn("Bash(backup:*)", healed["permissions"]["allow"])
-        self.assertIn("Bash(before:*)", healed["permissions"]["allow"])
-        self.assertTrue(changes)
-
-
-class TestLastGoodSettingsFile(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path("/tmp/cc-switch-merge-last-good-test")
-        if self.tmp.exists():
-            shutil.rmtree(self.tmp)
-        self.tmp.mkdir(parents=True)
-        self.last_good = self.tmp / "last_good_settings.json"
-
-    def tearDown(self):
-        if self.tmp.exists():
-            shutil.rmtree(self.tmp)
-
-    def test_load_last_good_missing_returns_empty_dict(self):
-        self.assertEqual(load_last_good_settings(self.last_good), {})
-
-    def test_load_last_good_reads_json(self):
-        self.last_good.write_text(json.dumps({"env": {"A": "B"}}), encoding="utf-8")
-        self.assertEqual(load_last_good_settings(self.last_good), {"env": {"A": "B"}})
-
-    def test_initialize_last_good_when_missing_and_source_complete(self):
-        source = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "keep"},
-            plugins=4,
-            hooks=3,
-        )
-
-        initialized = maybe_initialize_last_good_settings(self.last_good, source)
-
-        self.assertTrue(initialized)
-        self.assertEqual(json.loads(self.last_good.read_text(encoding="utf-8")), source)
-
-    def test_initialize_last_good_heals_reduced_source_from_rich_backup(self):
-        backup_dir = self.tmp / "backups"
-        backup_dir.mkdir()
-        rich = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "from-backup"},
-            plugins=5,
-            hooks=4,
-            allow=["Bash(backup:*)"],
-        )
-        reduced = {
-            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "from-source"},
-            "enabledPlugins": {"plugin0": True},
-            "hooks": {"SessionStart": []},
-            "permissions": {"allow": ["Bash(source:*)"], "deny": []},
-        }
-        (backup_dir / "settings-20260620-100000.json").write_text(
-            json.dumps(rich), encoding="utf-8"
-        )
-
-        initialized = maybe_initialize_last_good_settings(self.last_good, reduced, backup_dir)
-
-        self.assertTrue(initialized)
-        result = json.loads(self.last_good.read_text(encoding="utf-8"))
-        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-source")
-        self.assertEqual(len(result["enabledPlugins"]), 5)
-        self.assertEqual(len(result["hooks"]), 4)
-        self.assertIn("Bash(backup:*)", result["permissions"]["allow"])
-        self.assertIn("Bash(source:*)", result["permissions"]["allow"])
-
-    def test_initialize_last_good_rejects_reduced_source_without_backup(self):
-        reduced = {
-            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "keep"},
-            "enabledPlugins": {"plugin0": True},
-            "hooks": {"SessionStart": []},
-            "permissions": {"allow": [], "deny": []},
-        }
-
-        initialized = maybe_initialize_last_good_settings(self.last_good, reduced)
-
-        self.assertFalse(initialized)
-        self.assertFalse(self.last_good.exists())
-
-    def test_load_last_good_raises_for_corrupt_json(self):
-        self.last_good.write_text("{not-json", encoding="utf-8")
-
-        with self.assertRaises(Exception):
-            load_last_good_settings(self.last_good)
-
-    def test_initialize_last_good_does_not_overwrite_existing_file(self):
-        existing = {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "existing"}}
-        self.last_good.write_text(json.dumps(existing), encoding="utf-8")
-
-        initialized = maybe_initialize_last_good_settings(self.last_good, {"env": {"A": "B"}})
-
-        self.assertFalse(initialized)
-        self.assertEqual(json.loads(self.last_good.read_text(encoding="utf-8")), existing)
-
-
-class TestCmdMergeSettingsWithLastGood(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path("/tmp/cc-switch-merge-settings-last-good-cmd-test")
+        self.tmp = Path("/tmp/cc-switch-merge-settings-cmd-test")
         if self.tmp.exists():
             shutil.rmtree(self.tmp)
         self.tmp.mkdir(parents=True)
         self.settings = self.tmp / "settings.json"
         self.backup = self.tmp / "settings.json.bak"
         self.backup_dir = self.tmp / "backups"
-        self.last_good = self.tmp / "last_good_settings.json"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         if self.tmp.exists():
@@ -373,28 +249,22 @@ class TestCmdMergeSettingsWithLastGood(unittest.TestCase):
             settings_backup=self.backup,
             backup_dir=self.backup_dir,
             override_model=None,
-            last_good_settings=self.last_good,
         )
 
-    def test_merge_settings_uses_last_good_and_preserves_user_owned_env(self):
+    def test_merge_uses_before_as_truth_when_complete(self):
+        """before 完整时, 用 before 作骨架: 结构来自 before, env 白名单被 after 覆盖。"""
         after = {
             "env": {
                 "ANTHROPIC_MODEL": "new-model",
                 "ANTHROPIC_AUTH_TOKEN": "new-token",
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "bad-overwrite",
             },
-            "enabledPlugins": {"context-mode@context-mode": True},
-            "hooks": {"SessionStart": []},
         }
-        before = {
-            "env": {
-                "ANTHROPIC_MODEL": "old-model",
-            }
-        }
-        last_good = _complete_claude_settings(
+        before = _complete_claude_settings(
             env={
-                "ANTHROPIC_MODEL": "last-good-model",
-                "GITHUB_PERSONAL_ACCESS_TOKEN": "from-last-good",
+                "ANTHROPIC_MODEL": "old-model",
+                "ANTHROPIC_API_KEY": "PROXY_MANAGED",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "from-before",
             },
             plugins=2,
             hooks=2,
@@ -402,21 +272,66 @@ class TestCmdMergeSettingsWithLastGood(unittest.TestCase):
         )
         self.settings.write_text(json.dumps(after), encoding="utf-8")
         self.backup.write_text(json.dumps(before), encoding="utf-8")
-        self.last_good.write_text(json.dumps(last_good), encoding="utf-8")
 
         rc = cmd_merge_settings(self._args())
 
         self.assertEqual(rc, 0)
         result = json.loads(self.settings.read_text(encoding="utf-8"))
-        self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "new-model")
-        self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token")
-        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-last-good")
-        self.assertEqual(len(result["enabledPlugins"]), 2)
+        self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "new-model")       # after 覆盖
+        self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token")  # after 覆盖
+        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-before")  # truth 保留(白名单外)
+        self.assertEqual(result["env"]["ANTHROPIC_API_KEY"], "PROXY_MANAGED")  # truth 兜底(after 没有)
+        self.assertEqual(len(result["enabledPlugins"]), 2)                    # before 结构
         self.assertIn("PreToolUse", result["hooks"])
         self.assertEqual(result["permissions"]["allow"], ["Bash(git status:*)"])
 
+    def test_merge_falls_back_to_richest_backup_when_before_incomplete(self):
+        """before 不完整时, fallback 到 backups 目录里最丰富的 backup 作骨架。"""
+        after = {"env": {"ANTHROPIC_MODEL": "new-model"}}
+        before = {"env": {"ANTHROPIC_MODEL": "old"}}  # 不完整(score < 5)
+        backup = _complete_claude_settings(
+            env={
+                "ANTHROPIC_MODEL": "backup-model",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "from-backup",
+            },
+            plugins=3,
+            hooks=3,
+            allow=["Bash(backup:*)"],
+        )
+        self.settings.write_text(json.dumps(after), encoding="utf-8")
+        self.backup.write_text(json.dumps(before), encoding="utf-8")
+        (self.backup_dir / "settings-20260630-100000.json").write_text(
+            json.dumps(backup), encoding="utf-8"
+        )
+
+        rc = cmd_merge_settings(self._args())
+
+        self.assertEqual(rc, 0)
+        result = json.loads(self.settings.read_text(encoding="utf-8"))
+        # after 覆盖白名单
+        self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "new-model")
+        # richest backup 的结构 + env
+        self.assertEqual(len(result["enabledPlugins"]), 3)
+        self.assertEqual(len(result["hooks"]), 3)
+        self.assertIn("Bash(backup:*)", result["permissions"]["allow"])
+        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-backup")
+
+    def test_merge_fails_when_no_truth_available(self):
+        """before 不完整 + backup_dir 无可用 backup → 返回 1。"""
+        after = {"env": {"ANTHROPIC_MODEL": "new"}}
+        before = {"env": {"X": "y"}}  # 不完整
+        self.settings.write_text(json.dumps(after), encoding="utf-8")
+        self.backup.write_text(json.dumps(before), encoding="utf-8")
+        # backup_dir 空(无完整 backup)
+
+        rc = cmd_merge_settings(self._args())
+
+        self.assertEqual(rc, 1)
+
 
 class TestCmdRegenClaude(unittest.TestCase):
+    """regen-claude: 用 richest backup 作骨架 + live 白名单 env 覆盖, 不依赖 last_good/before。"""
+
     def setUp(self):
         self.tmp = Path("/tmp/cc-switch-merge-regen-claude-test")
         if self.tmp.exists():
@@ -424,7 +339,7 @@ class TestCmdRegenClaude(unittest.TestCase):
         self.tmp.mkdir(parents=True)
         self.settings = self.tmp / "settings.json"
         self.backup_dir = self.tmp / "backups"
-        self.last_good = self.tmp / "last_good_settings.json"
+        self.backup_dir.mkdir(parents=True)
         self.codex_config = self.tmp / "config.toml"
         self.codex_config.write_text('model = "should-not-change"\n', encoding="utf-8")
 
@@ -437,74 +352,57 @@ class TestCmdRegenClaude(unittest.TestCase):
         return Namespace(
             settings=self.settings,
             backup_dir=self.backup_dir,
-            last_good_settings=self.last_good,
             wsl_config=self.codex_config,
             override_model=None,
         )
 
-    def test_regen_claude_rebuilds_settings_only(self):
+    def _write_richest_backup(self, data, name="settings-20260630-120000.json"):
+        bak = self.backup_dir / name
+        bak.write_text(json.dumps(data), encoding="utf-8")
+        return bak
+
+    def test_regen_claude_uses_richest_backup_as_skeleton(self):
+        """regen-claude 用 richest backup 作骨架 + live 白名单 env 覆盖。"""
+        backup = _complete_claude_settings(
+            env={
+                "ANTHROPIC_MODEL": "old-model",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "from-backup",
+            },
+            plugins=2,
+            hooks=2,
+            allow=["Bash(git status:*)"],
+        )
+        self._write_richest_backup(backup)
         live = {
             "env": {
                 "ANTHROPIC_MODEL": "live-model",
                 "ANTHROPIC_AUTH_TOKEN": "live-token",
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "bad-live",
             },
-            "enabledPlugins": {"context-mode@context-mode": True},
+            "enabledPlugins": {"context-mode@context-mode": True},  # 缩水, 只有 1 plugin
         }
-        last_good = _complete_claude_settings(
-            env={
-                "ANTHROPIC_MODEL": "old-model",
-                "GITHUB_PERSONAL_ACCESS_TOKEN": "from-last-good",
-            },
-            plugins=2,
-            hooks=2,
-            allow=["Bash(git status:*)"],
-        )
         self.settings.write_text(json.dumps(live), encoding="utf-8")
-        self.last_good.write_text(json.dumps(last_good), encoding="utf-8")
 
         rc = cmd_regen_claude(self._args())
 
         self.assertEqual(rc, 0)
         result = json.loads(self.settings.read_text(encoding="utf-8"))
+        # live 白名单 env 覆盖
         self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "live-model")
         self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "live-token")
-        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-last-good")
+        # 非白名单 env 从 backup 保留
+        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-backup")
+        # 结构来自 backup(完整骨架), 不是 live(缩水)
+        self.assertEqual(len(result["enabledPlugins"]), 2)
         self.assertIn("PreToolUse", result["hooks"])
+        # Codex 不被触碰
         self.assertEqual(self.codex_config.read_text(encoding="utf-8"), 'model = "should-not-change"\n')
 
-    def test_regen_claude_preserves_live_stable_additions(self):
-        live = _complete_claude_settings(
-            env={
-                "ANTHROPIC_MODEL": "live-model",
-                "ANTHROPIC_AUTH_TOKEN": "live-token",
-                "GITHUB_PERSONAL_ACCESS_TOKEN": "bad-live",
-            },
-            plugins=2,
-            hooks=2,
-            extra={"newStableTopLevel": {"enabled": True}},
-        )
-        last_good = _complete_claude_settings(
-            env={"GITHUB_PERSONAL_ACCESS_TOKEN": "from-last-good"},
-            plugins=1,
-            hooks=1,
-        )
+    def test_regen_claude_fails_when_no_richest_backup(self):
+        """无可用 richest backup 时, regen-claude 返回 1。"""
+        live = _complete_claude_settings(env={"ANTHROPIC_MODEL": "live-model"})
         self.settings.write_text(json.dumps(live), encoding="utf-8")
-        self.last_good.write_text(json.dumps(last_good), encoding="utf-8")
-
-        rc = cmd_regen_claude(self._args())
-
-        self.assertEqual(rc, 0)
-        result = json.loads(self.settings.read_text(encoding="utf-8"))
-        self.assertIn("newStableTopLevel", result)
-        self.assertEqual(result["newStableTopLevel"], {"enabled": True})
-        self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-last-good")
-        refreshed = json.loads(self.last_good.read_text(encoding="utf-8"))
-        self.assertIn("newStableTopLevel", refreshed)
-
-    def test_regen_claude_fails_on_corrupt_last_good(self):
-        self.settings.write_text(json.dumps(_complete_claude_settings()), encoding="utf-8")
-        self.last_good.write_text("{not-json", encoding="utf-8")
+        # backup_dir 为空(无完整 backup)
 
         rc = cmd_regen_claude(self._args())
 
@@ -781,185 +679,6 @@ class TestBaseUrlRewrite(unittest.TestCase):
         # 不强求具体值 (取决于环境), 但如果有值必须是 IP 格式
         if ip is not None:
             self.assertRegex(ip, r"^\d+\.\d+\.\d+\.\d+$")
-
-
-class TestRestoreMissingSettingsKeys(unittest.TestCase):
-    """A 修复: 当 settings.json 被 cc-switch 简化 (缺关键字段), 从最近完整备份补全。"""
-
-    def test_restore_missing_keys_from_intact(self):
-        current = {"env": {"X": "Y"}}
-        intact = {
-            "env": {"X": "Y"},
-            "enabledPlugins": {"foo": True},
-            "permissions": {"allow": ["Bash"]},
-            "mcpServers": {},
-        }
-        result, restored = _mod.restore_missing_settings_keys(
-            current, intact, _mod.CCS_SETTINGS_PRESERVE_KEYS
-        )
-        self.assertIn("enabledPlugins", result)
-        self.assertIn("permissions", result)
-        self.assertIn("mcpServers", result)
-        self.assertIn("enabledPlugins", restored)
-        self.assertIn("permissions", restored)
-
-    def test_no_restore_when_all_present(self):
-        current = {"env": {}, "enabledPlugins": {"a": True}, "permissions": {}}
-        intact = {"enabledPlugins": {"b": True}}
-        result, restored = _mod.restore_missing_settings_keys(
-            current, intact, _mod.CCS_SETTINGS_PRESERVE_KEYS
-        )
-        self.assertEqual(restored, [])
-        # 已有的 enabledPlugins 不会被 intact 覆盖 (after wins)
-        self.assertEqual(result["enabledPlugins"], {"a": True})
-
-    def test_find_intact_settings_backup_prefers_most_recent_with_enough_keys(self):
-        tmpdir = Path("/tmp/test_intact_settings_backup_xyz")
-        if tmpdir.exists():
-            shutil.rmtree(tmpdir)
-        tmpdir.mkdir()
-        try:
-            # 写 2 个"残"备份 (只 env) 和 1 个"完整"备份
-            (tmpdir / "settings-20260601-100000.json").write_text(
-                '{"env": {"X": "Y"}}', encoding="utf-8"
-            )
-            (tmpdir / "settings-20260602-100000.json").write_text(
-                '{"env": {"X": "Y"}}', encoding="utf-8"
-            )
-            full_data = {
-                "env": {"X": "Y"},
-                "enabledPlugins": {"a": True},
-                "permissions": {"allow": []},
-                "hooks": {},
-                "mcpServers": {},
-                "extraKnownMarketplaces": {},
-                "autoCompactEnabled": True,
-                "context": {},
-                "language": "中文",
-                "skipDangerousModePermissionPrompt": True,
-                "statusLine": {},
-                "theme": "auto",
-                "verbose": False,
-            }
-            (tmpdir / "settings-20260603-100000.json").write_text(
-                json.dumps(full_data), encoding="utf-8"
-            )
-
-            result = _mod.find_intact_settings_backup(tmpdir)
-            self.assertIsNotNone(result)
-            self.assertEqual(result.name, "settings-20260603-100000.json")
-        finally:
-            shutil.rmtree(tmpdir)
-
-    def test_find_intact_returns_none_when_no_full_backup(self):
-        tmpdir = Path("/tmp/test_intact_none_xyz")
-        if tmpdir.exists():
-            shutil.rmtree(tmpdir)
-        tmpdir.mkdir()
-        try:
-            (tmpdir / "settings-20260601-100000.json").write_text(
-                '{"env": {"X": "Y"}}', encoding="utf-8"
-            )
-            result = _mod.find_intact_settings_backup(tmpdir)
-            self.assertIsNone(result)
-        finally:
-            shutil.rmtree(tmpdir)
-
-
-class TestRestoreReducedSettingsKeys(unittest.TestCase):
-    """防降级棘轮: 检测结构性字段 (enabledPlugins/hooks) 内容被削减, 从最丰富备份恢复。
-
-    cc-switch 接管时偶尔写"部分配置" (env + 极简 plugins/hooks), key 都在但项数少。
-    restore_missing 检测不到 (key 不缺), 需要 restore_reduced 兜底。
-    """
-
-    def _full_keys(self):
-        return {
-            "env": {"X": "Y"},
-            "enabledPlugins": {},
-            "permissions": {"allow": [], "deny": []},
-            "hooks": {},
-            "mcpServers": {},
-            "extraKnownMarketplaces": {},
-            "autoCompactEnabled": True,
-            "context": {},
-            "language": "中文",
-            "skipDangerousModePermissionPrompt": True,
-            "statusLine": {},
-            "theme": "auto",
-            "verbose": False,
-        }
-
-    def test_restore_reduced_plugins_and_hooks(self):
-        """cc-switch 写了部分配置 (1 plugin, 1 hook), 应从完整备份恢复 10 plugins / 6 hooks。"""
-        current = {
-            "env": {"X": "Y"},
-            "enabledPlugins": {"context-mode": True},      # 被削到 1 个
-            "hooks": {"SessionStart": []},                  # 被削到 1 个
-        }
-        intact = {
-            "enabledPlugins": {f"p{i}": True for i in range(10)},
-            "hooks": {h: [] for h in ["PostToolUse", "PreCompact", "PreToolUse", "SessionStart", "Stop", "UserPromptSubmit"]},
-            "mcpServers": {},
-        }
-        result, restored = _mod.restore_reduced_settings_keys(current, intact)
-        self.assertEqual(len(result["enabledPlugins"]), 10)
-        self.assertEqual(len(result["hooks"]), 6)
-        self.assertIn("enabledPlugins", " ".join(restored))
-        self.assertIn("hooks", " ".join(restored))
-
-    def test_no_restore_when_content_not_reduced(self):
-        """current 内容比 intact 还多时, 不动。"""
-        current = {"enabledPlugins": {"a": True, "b": True}, "hooks": {"A": [], "B": []}}
-        intact = {"enabledPlugins": {"a": True}, "hooks": {"A": []}}
-        result, restored = _mod.restore_reduced_settings_keys(current, intact)
-        self.assertEqual(restored, [])
-        self.assertEqual(len(result["enabledPlugins"]), 2)
-
-    def test_permissions_union_not_replace(self):
-        """permissions 用 union 合并, 不丢失 current 新增的条目。"""
-        current = {
-            "enabledPlugins": {"a": True},
-            "permissions": {"allow": ["Bash(new-cmd)"], "deny": ["deny_current"]},
-        }
-        intact = {
-            "enabledPlugins": {"a": True, "b": True},
-            "permissions": {"allow": ["Bash(old-cmd)", "Bash(new-cmd)"], "deny": ["deny_old"]},
-        }
-        result, restored = _mod.restore_reduced_settings_keys(current, intact)
-        # current 新增的 Bash(new-cmd) 不能丢, intact 的 Bash(old-cmd) 要补进来
-        allow = result["permissions"]["allow"]
-        self.assertIn("Bash(new-cmd)", allow)
-        self.assertIn("Bash(old-cmd)", allow)
-        # deny 也 union
-        self.assertIn("deny_current", result["permissions"]["deny"])
-        self.assertIn("deny_old", result["permissions"]["deny"])
-
-    def test_find_intact_prefers_richest_content_not_most_recent(self):
-        """两个 >=10 key 的备份, 应选内容最丰富的 (10 plugins), 不是最近的 (1 plugin)。"""
-        tmpdir = Path("/tmp/test_intact_richest_xyz")
-        if tmpdir.exists():
-            shutil.rmtree(tmpdir)
-        tmpdir.mkdir()
-        try:
-            rich = self._full_keys()
-            rich["enabledPlugins"] = {f"p{i}": True for i in range(10)}
-            rich["hooks"] = {h: [] for h in ["PostToolUse", "PreCompact", "PreToolUse", "SessionStart", "Stop", "UserPromptSubmit"]}
-            # rich 是旧的 (20260601), 但内容丰富
-            (tmpdir / "settings-20260601-100000.json").write_text(json.dumps(rich), encoding="utf-8")
-
-            recent = self._full_keys()
-            recent["enabledPlugins"] = {"only-one": True}   # 新但内容被削
-            recent["hooks"] = {"SessionStart": []}
-            (tmpdir / "settings-20260605-100000.json").write_text(json.dumps(recent), encoding="utf-8")
-
-            result = _mod.find_intact_settings_backup(tmpdir)
-            self.assertIsNotNone(result)
-            # 应选内容丰富的旧备份, 不是内容被削的新备份
-            self.assertEqual(result.name, "settings-20260601-100000.json")
-        finally:
-            shutil.rmtree(tmpdir)
-
 
 class TestSyncAuth(unittest.TestCase):
     """E 修复: wrapper 应该把 auth.json 跟 config.toml/settings.json 一样处理 (备份+同步)。

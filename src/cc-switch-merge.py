@@ -68,7 +68,7 @@ CCS_CODEX_TABLE_SECTIONS: tuple[str, ...] = ("tui", "features", "memories", "hoo
 CCS_PROXY_BASE_URL = "http://127.0.0.1:15721"
 
 # Claude settings.json 的 env 里, 这些字段归 cc-switch/provider 切换流程管理。
-# 其他 env 字段默认归用户稳定配置, 从 last_good 保留。
+# 其他 env 字段默认归用户稳定配置, 从 truth(before/richest backup)保留。
 CCS_CLAUDE_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "ANTHROPIC_MODEL",
     "ANTHROPIC_BASE_URL",
@@ -85,8 +85,6 @@ CCS_CLAUDE_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "ZAI_API_KEY",
 )
-
-CCS_LAST_GOOD_SETTINGS = Path.home() / ".claude" / "last_good_settings.json"
 
 
 # ---------------------------------------------------------------------------
@@ -107,16 +105,6 @@ def write_json(path: Path, data: dict) -> None:
         json.dumps(data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-
-
-def load_last_good_settings(path: Path) -> dict:
-    """读取 Claude last_good settings；缺失返回空 dict，损坏时抛错。"""
-    if not path.exists():
-        return {}
-    data = parse_json(path)
-    if not isinstance(data, dict):
-        raise ValueError(f"last_good settings must be a JSON object: {path}")
-    return data
 
 
 def backup_file(src: Path, backup_dir: Path, prefix: str) -> Path | None:
@@ -273,16 +261,25 @@ def merge_settings(after: dict, before: dict) -> dict:
     return result
 
 
-def merge_settings_with_last_good(after: dict, last_good: dict) -> dict:
-    """以 last_good 为 Claude settings 稳定真相, 只用 after 覆盖 cc-switch-owned env。"""
-    result = dict(last_good)
+def merge_settings_with_truth(after: dict, truth: dict) -> dict:
+    """以 truth(完整骨架)为基底, 只用 after 覆盖 cc-switch-owned env(白名单)。
 
+    truth = before(启动备份)或 richest backup, 必须完整。
+    after  = cc-switch 切换后的 settings.json(可能缩水, 主要用它的 env)。
+
+    env 合成语义(修复了旧 merge_settings_with_last_good 的 API_KEY 丢失 bug):
+    - truth.env 全部保留作基底(包括白名单字段, 如 ANTHROPIC_API_KEY=PROXY_MANAGED)
+    - after.env 中的白名单字段覆盖 truth(当前 provider 真实值, 清 stale)
+    - after 没有的白名单字段, 从 truth 兜底(不再丢弃, 保住 API_KEY)
+    """
+    result = dict(truth)
+
+    # truth.env 全部保留作基底(白名单 + 非白名单)
     merged_env: dict[str, Any] = {}
-    if isinstance(last_good.get("env"), dict):
-        for key, value in last_good["env"].items():
-            if key not in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
-                merged_env[key] = value
+    if isinstance(truth.get("env"), dict):
+        merged_env.update(truth["env"])
 
+    # after.env 的白名单字段覆盖(当前 provider 真实值)
     after_env = after.get("env")
     if isinstance(after_env, dict):
         for key in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
@@ -399,63 +396,6 @@ def find_intact_settings_backup(backup_dir: Path, min_keys: int = 10) -> Path | 
     return candidates[0][2]
 
 
-def restore_missing_settings_keys(
-    current: dict, intact_backup: dict, keys: tuple[str, ...]
-) -> tuple[dict, list[str]]:
-    """把 current 缺失的 keys 从 intact_backup 补全, 返回 (新 dict, 恢复的 key 列表)。"""
-    restored: list[str] = []
-    result = dict(current)
-    for k in keys:
-        if k in result:
-            continue
-        if k in intact_backup:
-            result[k] = intact_backup[k]
-            restored.append(k)
-    return result, restored
-
-
-def restore_reduced_settings_keys(
-    current: dict, intact_backup: dict
-) -> tuple[dict, list[str]]:
-    """检测结构性字段内容被"削减" (key 在但项数变少), 从 intact_backup 恢复。
-
-    cc-switch 接管时偶尔写"部分配置" (env + 极简 enabledPlugins + 极简 hooks),
-    这种情况 key 都在, merge_settings 的 restore_missing 不会触发。
-    本函数对 enabledPlugins/hooks/mcpServers 等 dict 字段检测项数减少,
-    减少了就用 intact_backup 的完整版替换, 防止配置越恢复越少 (降级棘轮)。
-    permissions 用 union 合并 (不替换, 避免丢当前新加的条目)。
-    """
-    restored: list[str] = []
-    result = dict(current)
-    for k in ("enabledPlugins", "hooks", "mcpServers"):
-        intact_val = intact_backup.get(k)
-        if not isinstance(intact_val, dict):
-            continue
-        cur_val = current.get(k)
-        # current 没有, 或是 dict 但项数比 intact 少 -> 用 intact 替换
-        if not isinstance(cur_val, dict) or len(cur_val) < len(intact_val):
-            result[k] = intact_val
-            cur_n = len(cur_val) if isinstance(cur_val, dict) else 0
-            restored.append(f"{k}({cur_n}->{len(intact_val)})")
-    # permissions: union 合并 allow/deny (不去重丢失当前新增的)
-    intact_perm = intact_backup.get("permissions", {})
-    if isinstance(intact_perm, dict):
-        cur_perm = result.get("permissions", {})
-        if not isinstance(cur_perm, dict):
-            cur_perm = {}
-        merged_perm = dict(cur_perm)
-        for field in ("allow", "deny"):
-            intact_arr = intact_perm.get(field, [])
-            cur_arr = cur_perm.get(field, [])
-            if isinstance(intact_arr, list) and isinstance(cur_arr, list):
-                union = list(dict.fromkeys(cur_arr + intact_arr))  # 去重保序
-                if len(union) > len(cur_arr):
-                    merged_perm[field] = union
-                    restored.append(f"permissions.{field}({len(cur_arr)}->{len(union)})")
-        result["permissions"] = merged_perm
-    return result, restored
-
-
 def _settings_truth_is_usable(settings: Any) -> bool:
     """判断 settings 是否足够完整, 可以作为 last_good 真相源。"""
     if not isinstance(settings, dict):
@@ -466,106 +406,6 @@ def _settings_truth_is_usable(settings: Any) -> bool:
     if len(settings) < 10:
         return False
     return _settings_content_score(settings) >= 5
-
-
-def _merge_stable_settings_source(
-    current: dict,
-    source: dict,
-    source_name: str,
-    user_env_mode: str = "missing",
-) -> tuple[dict, list[str]]:
-    """把稳定配置源补进 current, 备份补缺口, live/before 可刷新同名稳定项。"""
-    if not isinstance(source, dict) or not source:
-        return dict(current), []
-
-    result = dict(current)
-    changes: list[str] = []
-    overwrite_stable = user_env_mode in ("overwrite", "stable")
-    overwrite_user_env = user_env_mode == "overwrite"
-    structural_keys = ("enabledPlugins", "hooks", "mcpServers")
-
-    for key, value in source.items():
-        if key == "env" or key == "permissions" or key in structural_keys:
-            continue
-        if key not in result or (overwrite_stable and result.get(key) != value):
-            result[key] = value
-            changes.append(f"{key}(from {source_name})")
-
-    for key in structural_keys:
-        source_val = source.get(key)
-        if not isinstance(source_val, dict):
-            continue
-        current_val = result.get(key)
-        if not isinstance(current_val, dict):
-            result[key] = dict(source_val)
-            changes.append(f"{key}(restore {len(source_val)} from {source_name})")
-            continue
-
-        merged_val = dict(current_val)
-        changed = 0
-        for child_key, child_value in source_val.items():
-            if child_key not in merged_val or (overwrite_stable and merged_val[child_key] != child_value):
-                merged_val[child_key] = child_value
-                changed += 1
-        if changed:
-            result[key] = merged_val
-            changes.append(f"{key}(+{changed} from {source_name})")
-
-    source_perm = source.get("permissions")
-    if isinstance(source_perm, dict):
-        current_perm = result.get("permissions")
-        if not isinstance(current_perm, dict):
-            current_perm = {}
-        merged_perm = dict(current_perm)
-        for field in ("allow", "deny"):
-            source_arr = source_perm.get(field, [])
-            current_arr = current_perm.get(field, [])
-            if isinstance(source_arr, list) and isinstance(current_arr, list):
-                if field not in merged_perm:
-                    merged_perm[field] = list(source_arr)
-                    if source_arr:
-                        changes.append(f"permissions.{field}(+{len(source_arr)} from {source_name})")
-                    continue
-                union = list(dict.fromkeys(current_arr + source_arr))
-                if len(union) > len(current_arr):
-                    merged_perm[field] = union
-                    changes.append(
-                        f"permissions.{field}(+{len(union) - len(current_arr)} from {source_name})"
-                    )
-        result["permissions"] = merged_perm
-
-    source_env = source.get("env")
-    if user_env_mode != "ignore" and isinstance(source_env, dict):
-        result_env: dict[str, Any] = {}
-        if isinstance(result.get("env"), dict):
-            result_env.update(result["env"])
-        for key, value in source_env.items():
-            if key in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
-                continue
-            if not overwrite_user_env and key in result_env:
-                continue
-            if result_env.get(key) != value:
-                result_env[key] = value
-                changes.append(f"env.{key}(from {source_name})")
-        if result_env:
-            result["env"] = result_env
-
-    return result, changes
-
-
-def heal_last_good_settings(
-    last_good: dict,
-    sources: tuple[tuple[str, dict, str], ...],
-) -> tuple[dict, list[str]]:
-    """用可信稳定源修复 last_good, 只补全/扩展稳定配置。"""
-    healed = dict(last_good)
-    all_changes: list[str] = []
-    for source_name, source, user_env_mode in sources:
-        healed, changes = _merge_stable_settings_source(
-            healed, source, source_name, user_env_mode=user_env_mode
-        )
-        all_changes.extend(changes)
-    return healed, all_changes
 
 
 def _load_intact_settings_backup(backup_dir: Path) -> tuple[Path | None, dict]:
@@ -582,26 +422,18 @@ def _load_intact_settings_backup(backup_dir: Path) -> tuple[Path | None, dict]:
     return intact_path, intact_data
 
 
-def maybe_initialize_last_good_settings(
-    path: Path, source: dict, backup_dir: Path | None = None
-) -> bool:
-    """last_good 不存在时, 先用最丰富备份和 source healing 后再初始化。"""
-    if path.exists():
-        return False
+def _select_truth(before: dict, backup_dir: Path) -> tuple[dict | None, str]:
+    """选完整骨架: before 完整用 before, 否则用 richest backup。
 
-    sources: list[tuple[str, dict, str]] = []
-    if backup_dir is not None:
-        intact_path, intact_data = _load_intact_settings_backup(backup_dir)
-        if intact_path is not None and intact_data:
-            sources.append((intact_path.name, intact_data, "missing"))
-    sources.append(("source", source, "overwrite"))
-
-    candidate, _ = heal_last_good_settings({}, tuple(sources))
-    if not _settings_truth_is_usable(candidate):
-        return False
-
-    write_json(path, candidate)
-    return True
+    返回 (truth_dict, source_label)。两者都不可用时返回 (None, "")。
+    新架构核心: 取代旧的 last_good healing。
+    """
+    if _settings_truth_is_usable(before):
+        return before, "before(启动备份)"
+    intact_path, intact_data = _load_intact_settings_backup(backup_dir)
+    if intact_path is not None and intact_data and _settings_truth_is_usable(intact_data):
+        return intact_data, f"richest backup({intact_path.name})"
+    return None, ""
 
 
 def get_provider_model_from_db(provider_id: str, app_type: str = "codex") -> str | None:
@@ -757,44 +589,17 @@ def cmd_merge_settings(args) -> int:
         print(f"[merge-settings] No 'before' backup found: {backup_path}", file=sys.stderr)
         return 1
 
-    last_good_path = getattr(args, "last_good_settings", CCS_LAST_GOOD_SETTINGS)
-    try:
-        last_good = load_last_good_settings(last_good_path)
-    except Exception as e:
-        print(f"[merge-settings] last_good 无法读取: {last_good_path}: {e}", file=sys.stderr)
+    # 选骨架: before 完整用 before, 否则用 richest backup(取代旧 last_good healing)
+    truth, src = _select_truth(before, backup_dir)
+    if truth is None:
+        print(
+            f"[merge-settings] 无可用骨架(before 和 richest backup 都不完整): {backup_dir}",
+            file=sys.stderr,
+        )
         return 1
+    print(f"[merge-settings] 骨架: {src}")
 
-    if not last_good and maybe_initialize_last_good_settings(last_good_path, before, backup_dir):
-        print(f"[merge-settings] 初始化 last_good: {last_good_path}")
-        try:
-            last_good = load_last_good_settings(last_good_path)
-        except Exception as e:
-            print(f"[merge-settings] last_good 初始化后无法读取: {last_good_path}: {e}", file=sys.stderr)
-            return 1
-
-    using_last_good = bool(last_good)
-    if using_last_good:
-        sources: list[tuple[str, dict, str]] = []
-        intact_path, intact_data = _load_intact_settings_backup(backup_dir)
-        if intact_path is not None and intact_data:
-            sources.append((intact_path.name, intact_data, "missing"))
-        sources.append(("before", before, "overwrite"))
-        healed_last_good, healed = heal_last_good_settings(last_good, tuple(sources))
-        if not _settings_truth_is_usable(healed_last_good):
-            print(f"[merge-settings] last_good healing 后仍不完整: {last_good_path}", file=sys.stderr)
-            return 1
-        if healed:
-            print(
-                f"[merge-settings] 修复 last_good 稳定配置: "
-                f"{', '.join(healed[:6])}{' ...' if len(healed) > 6 else ''}"
-            )
-        if healed_last_good != last_good:
-            write_json(last_good_path, healed_last_good)
-            print(f"[merge-settings] 刷新 last_good: {last_good_path}")
-        merged = merge_settings_with_last_good(after, healed_last_good)
-        print(f"[merge-settings] 使用 last_good 合成: {last_good_path}")
-    else:
-        merged = merge_settings(after, before)
+    merged = merge_settings_with_truth(after, truth)
 
     # 覆盖 env.ANTHROPIC_MODEL (cc-switch 热切换时 claude provider 不一定改 settings.json)
     # 同时覆盖 CCS_KNOWN_TOP_KEYS (model 等顶层 key)
@@ -822,35 +627,8 @@ def cmd_merge_settings(args) -> int:
                 f"(直连 API 改回 cc-switch 代理)"
             )
 
-    if not using_last_good:
-        # 防退化: 如果 after 缺关键用户字段 (被 cc-switch 接管简化过),
-        # 从最近"完整"备份补全, 避免合并后用户的 plugins/permissions/MCP 消失。
-        missing_keys = [k for k in CCS_SETTINGS_PRESERVE_KEYS if k not in merged]
-        intact = find_intact_settings_backup(backup_dir) if (missing_keys) else None
-        if missing_keys and intact is not None:
-            intact_data = parse_json(intact)
-            merged, restored = restore_missing_settings_keys(
-                merged, intact_data, CCS_SETTINGS_PRESERVE_KEYS
-            )
-            if restored:
-                print(
-                    f"[merge-settings] 防退化: 从 {intact.name} 恢复 {len(restored)} 个字段: "
-                    f"{', '.join(restored[:6])}{' ...' if len(restored) > 6 else ''}"
-                )
-
-        # 防降级棘轮: 检测结构性字段 (enabledPlugins/hooks/mcpServers) 内容被削减,
-        # key 在但项数比完整备份少时, 用最丰富的备份替换。cc-switch 写"部分配置"
-        # (env + 极简 plugins/hooks) 时, restore_missing 检测不到, 这里兜底。
-        # 每次都跑 (不只 missing_keys 时), 因为部分配置 key 齐全但内容被削。
-        intact = intact or find_intact_settings_backup(backup_dir)
-        if intact is not None:
-            intact_data = parse_json(intact)
-            merged, restored = restore_reduced_settings_keys(merged, intact_data)
-            if restored:
-                print(
-                    f"[merge-settings] 防降级: 从 {intact.name} 恢复削减字段: "
-                    f"{', '.join(restored)}"
-                )
+    # (旧 restore_missing_settings_keys / restore_reduced_settings_keys 事后恢复分支已删除:
+    #  新架构骨架 before/richest backup 本身完整, 不需要事后补缺/防降级)
 
     # Backup current file before overwriting
     bak = backup_file(settings_path, backup_dir, prefix="settings")
@@ -863,50 +641,32 @@ def cmd_merge_settings(args) -> int:
 
 
 def cmd_regen_claude(args) -> int:
-    """只用 last_good + 当前 live env 重建 Claude settings.json。"""
+    """手动重建 settings.json: 用 richest backup 作骨架 + live env 合成。
+
+    不依赖 before(启动备份), 用于 settings.json 损坏/缩水时手动修复。
+    live 不可读时纯用骨架。
+    """
     settings_path: Path = args.settings
     backup_dir: Path = args.backup_dir
-    last_good_path: Path = getattr(args, "last_good_settings", CCS_LAST_GOOD_SETTINGS)
 
-    live = parse_json(settings_path)
-    if not live:
-        print(f"[regen-claude] No live settings found: {settings_path}", file=sys.stderr)
-        return 1
+    live = parse_json(settings_path) or {}
 
-    try:
-        last_good = load_last_good_settings(last_good_path)
-    except Exception as e:
-        print(f"[regen-claude] last_good 无法读取: {last_good_path}: {e}", file=sys.stderr)
-        return 1
-    if not last_good:
-        print(f"[regen-claude] No last_good found: {last_good_path}", file=sys.stderr)
-        return 1
-
-    sources: list[tuple[str, dict, str]] = []
     intact_path, intact_data = _load_intact_settings_backup(backup_dir)
-    if intact_path is not None and intact_data:
-        sources.append((intact_path.name, intact_data, "missing"))
-    sources.append(("live", live, "stable"))
-    healed_last_good, healed = heal_last_good_settings(last_good, tuple(sources))
-    if not _settings_truth_is_usable(healed_last_good):
-        print(f"[regen-claude] last_good healing 后仍不完整: {last_good_path}", file=sys.stderr)
+    if intact_path is None or not intact_data or not _settings_truth_is_usable(intact_data):
+        print(f"[regen-claude] 无可用 richest backup: {backup_dir}", file=sys.stderr)
         return 1
-    if healed:
-        print(
-            f"[regen-claude] 修复 last_good 稳定配置: "
-            f"{', '.join(healed[:6])}{' ...' if len(healed) > 6 else ''}"
-        )
-    if healed_last_good != last_good:
-        write_json(last_good_path, healed_last_good)
-        print(f"[regen-claude] 刷新 last_good: {last_good_path}")
+    print(f"[regen-claude] 骨架: richest backup({intact_path.name})")
 
-    merged = merge_settings_with_last_good(live, healed_last_good)
+    merged = merge_settings_with_truth(live, intact_data)
 
     override = getattr(args, "override_model", None)
     if override:
         if "env" not in merged or not isinstance(merged.get("env"), dict):
             merged["env"] = {}
-        merged["env"]["ANTHROPIC_MODEL"] = override
+        if merged["env"].get("ANTHROPIC_MODEL") != override:
+            old = merged["env"].get("ANTHROPIC_MODEL", "<missing>")
+            print(f"[regen-claude] Override env.ANTHROPIC_MODEL: {old} -> {override}")
+            merged["env"]["ANTHROPIC_MODEL"] = override
 
     env = merged.get("env", {})
     if isinstance(env, dict):
@@ -1178,12 +938,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Alias for --settings-backup",
     )
     parser.add_argument(
-        "--last-good-settings",
-        type=Path,
-        default=CCS_LAST_GOOD_SETTINGS,
-        help="Path to Claude last_good settings truth file",
-    )
-    parser.add_argument(
         "--wsl-config",
         type=Path,
         default=Path.home() / ".codex" / "config.toml",
@@ -1241,7 +995,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "regen-claude",
-        help="Regenerate Claude settings.json from last_good + current cc-switch env",
+        help="Regenerate Claude settings.json from richest backup + current cc-switch env",
     )
     sub.add_parser(
         "merge-codex-wsl",
@@ -1284,7 +1038,6 @@ def main() -> int:
         args.wsl_auth = sim / "auth.json"
         args.windows_auth = sim / "windows-auth.json"
         args.backup_dir = sim / "backups"
-        args.last_good_settings = sim / "last_good_settings.json"
 
     # Resolve --backup alias for settings_backup
     if args.settings_backup is None and args.backup is not None:
