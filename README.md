@@ -14,7 +14,7 @@ cc-switch 退出时自动合并 settings.json 和 config.toml 并同步到 Windo
 
 ## 解决什么问题
 
-cc-switch 在"代理接管"模式下, 会重写 `~/.claude/settings.json` 和 `~/.codex/config.toml`, 但**只写代理相关字段** (`ANTHROPIC_BASE_URL` / `model_providers.custom.base_url`), 会清空用户的 `permissions` / `enabledPlugins` / `mcpServers` / `env.ANTHROPIC_MODEL` 等配置。
+cc-switch 在"代理接管"模式下, 会重写 `~/.claude/settings.json` 和 `~/.codex/config.toml`, 但**只写代理相关字段** (`ANTHROPIC_BASE_URL` / `model_providers.custom.base_url`), 会清空用户的 `permissions` / `enabledPlugins` / `mcpServers` / provider 受管 env 字段等配置。
 
 本工具在 cc-switch 启动时备份 4 个文件 (settings.json, WSL/Windows config.toml, auth.json), 退出时合并 (after 优先, before 补全), 同步到 Windows 端。
 
@@ -37,7 +37,7 @@ alias cc-switch=$HOME/myx/bin/cc-switch
 
 ```bash
 cd tests
-python3 -m unittest cc-switch-merge_test -v    # 41 单测
+python3 -m unittest cc-switch-merge_test -v    # 55 单测
 bash cc-switch-sim.sh                           # 端到端模拟
 ```
 
@@ -50,6 +50,9 @@ bash cc-switch-sim.sh                           # 端到端模拟
 | C | merge_settings env 块 deep merge (after wins, before 补全) — 解决 ANTHROPIC_MODEL 丢失 |
 | D | auth.json 备份 + mtime-based 跨端同步 |
 | E | wrapper 日志 watcher 同时支持 codex + claude provider, 写 env.ANTHROPIC_MODEL |
+| F | `cmd_all` 按 `app_type` 分组执行, 防止切 Claude 时污染 Codex config |
+| G | Claude env 白名单纳入 FABLE 默认模型键, 让 `ANTHROPIC_DEFAULT_FABLE_MODEL*` 随 provider 切换 |
+| H | 认证键互斥: `AUTH_TOKEN` 存在时剔除 `API_KEY`, 消除 cc-switch 接管写入的 `API_KEY=PROXY_MANAGED` 占位导致的 Claude 启动告警 |
 
 ## Debug
 

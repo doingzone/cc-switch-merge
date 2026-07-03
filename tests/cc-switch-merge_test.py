@@ -191,16 +191,21 @@ class TestMergeSettingsWithTruth(unittest.TestCase):
 
     def test_allows_wide_cc_switch_env_keys(self):
         last_good = {"env": {}}
+        # 排除互斥的认证键对(AUTH_TOKEN 存在会剔除 API_KEY), 避免干扰白名单覆盖断言
+        override_keys = [
+            k for k in CCS_CLAUDE_ENV_OVERRIDE_KEYS
+            if k not in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+        ]
         after = {
             "env": {
                 key: f"value-{index}"
-                for index, key in enumerate(CCS_CLAUDE_ENV_OVERRIDE_KEYS)
+                for index, key in enumerate(override_keys)
             }
         }
 
         result = merge_settings_with_truth(after, last_good)
 
-        for key in CCS_CLAUDE_ENV_OVERRIDE_KEYS:
+        for key in override_keys:
             self.assertEqual(result["env"][key], after["env"][key])
 
     def test_fable_default_model_keys_follow_after_env(self):
@@ -221,6 +226,43 @@ class TestMergeSettingsWithTruth(unittest.TestCase):
 
         self.assertEqual(result["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"], "glm-5.2[1M]")
         self.assertEqual(result["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"], "glm-5.2")
+
+    def test_auth_token_present_removes_api_key(self):
+        """AUTH_TOKEN 存在时剔除 API_KEY(认证键互斥, 避免 Claude Code 启动告警)。
+        cc-switch 接管会写 API_KEY=PROXY_MANAGED 占位, 必须剔掉。
+        """
+        truth = {
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+                "ANTHROPIC_API_KEY": "PROXY_MANAGED",
+            }
+        }
+        after = {"env": {"ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED"}}
+
+        result = merge_settings_with_truth(after, truth)
+
+        self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "PROXY_MANAGED")
+        self.assertNotIn("ANTHROPIC_API_KEY", result["env"])
+
+    def test_api_key_kept_when_no_auth_token(self):
+        """无 AUTH_TOKEN 时保留 API_KEY(未来 KEY-only provider 不被误删)。"""
+        truth = {"env": {"ANTHROPIC_API_KEY": "real-key"}}
+        after = {"env": {}}
+
+        result = merge_settings_with_truth(after, truth)
+
+        self.assertEqual(result["env"]["ANTHROPIC_API_KEY"], "real-key")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", result["env"])
+
+    def test_no_auth_keys_neither_created(self):
+        """两个认证键都不存在时, 不报错也不凭空造键。"""
+        truth = {"env": {"ANTHROPIC_MODEL": "m1"}}
+        after = {"env": {}}
+
+        result = merge_settings_with_truth(after, truth)
+
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", result["env"])
+        self.assertNotIn("ANTHROPIC_API_KEY", result["env"])
 
     def test_truth_whitelist_env_kept_when_after_omits(self):
         """after 缺白名单字段时, 从 truth 兜底(修复 API_KEY 丢失;权衡: stale 也保留)。
@@ -300,7 +342,7 @@ class TestCmdMergeSettings(unittest.TestCase):
         self.assertEqual(result["env"]["ANTHROPIC_MODEL"], "new-model")       # after 覆盖
         self.assertEqual(result["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token")  # after 覆盖
         self.assertEqual(result["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "from-before")  # truth 保留(白名单外)
-        self.assertEqual(result["env"]["ANTHROPIC_API_KEY"], "PROXY_MANAGED")  # truth 兜底(after 没有)
+        self.assertNotIn("ANTHROPIC_API_KEY", result["env"])  # AUTH_TOKEN 存在 → 互斥剔除 API_KEY
         self.assertEqual(len(result["enabledPlugins"]), 2)                    # before 结构
         self.assertIn("PreToolUse", result["hooks"])
         self.assertEqual(result["permissions"]["allow"], ["Bash(git status:*)"])

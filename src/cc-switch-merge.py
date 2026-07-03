@@ -288,6 +288,11 @@ def merge_settings_with_truth(after: dict, truth: dict) -> dict:
             if key in after_env:
                 merged_env[key] = after_env[key]
 
+    # 认证键互斥: AUTH_TOKEN 优先(匹配 Claude Code 语义 + 当前所有 provider 都用 TOKEN)
+    # cc-switch 接管会写 API_KEY=PROXY_MANAGED 占位, 必须剔除, 否则与 AUTH_TOKEN 共存触发启动告警
+    if merged_env.get("ANTHROPIC_AUTH_TOKEN"):
+        merged_env.pop("ANTHROPIC_API_KEY", None)
+
     if merged_env:
         result["env"] = merged_env
     elif "env" in result:
